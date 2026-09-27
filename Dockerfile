@@ -20,9 +20,7 @@ WORKDIR /app
 COPY CMakeLists.txt LICENSE ./
 COPY include/ include/
 COPY src/ src/
-COPY tests/ tests/
 RUN cmake -S . -B build -G Ninja -DCMAKE_CXX_COMPILER=clang++ \
        -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DNATIVEOPT=${NATIVEOPT} \
-    && cmake --build build -j ${BUILD_JOBS} \
-    && ctest --test-dir build --output-on-failure
-CMD ["ctest", "--test-dir", "build", "--output-on-failure"]
+    && cmake --build build -j ${BUILD_JOBS}
+ENTRYPOINT ["/app/build/lut-bench"]
