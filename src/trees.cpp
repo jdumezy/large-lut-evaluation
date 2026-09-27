@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include "trees.hpp"
+#include <algorithm>
+#include <array>
 #include <bit>
+#include <limits>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -45,12 +48,73 @@ Row Build(const Setup& s, std::span<Row> rows, bool lazy) {
 
 Ciphertext WeightedSum(const Setup& s, const Row& row, std::span<const int64_t> lut, size_t offset,
                        size_t stride) {
-    auto result = s.cc->GetScheme()->MultByInteger(row[0], lut[offset]);
-    for (size_t i = 1; i < row.size(); ++i)
-        s.cc->EvalAddInPlaceNoCheck(result,
-                                    s.cc->GetScheme()->MultByInteger(row[i], lut[offset + i * stride]));
+    using Wide = DoubleNativeInt;
+    static_assert(sizeof(Wide) == 16);
+    constexpr uint64_t lowMask = std::numeric_limits<uint32_t>::max();
+    std::vector<uint64_t> weights(row.size());
+    Wide weightSum = 0;
+    for (size_t i = 0; i < row.size(); ++i) {
+        weights[i] = lut[offset + i * stride];
+        weightSum += weights[i];
+    }
+    const auto& prototype = row[0]->GetElements();
+    uint64_t maxModulus = 0;
+    for (const auto& tower : prototype[0].GetAllElements())
+        maxModulus = std::max(maxModulus, tower.GetModulus().ConvertToInt<uint64_t>());
+    if (weightSum > ~Wide{0} / (maxModulus - 1)) {
+        // Very large public integer weights can exceed a 128-bit dot product.
+        auto result = s.cc->GetScheme()->MultByInteger(row[0], weights[0]);
+        for (size_t i = 1; i < row.size(); ++i)
+            s.cc->EvalAddInPlaceNoCheck(result, s.cc->GetScheme()->MultByInteger(row[i], weights[i]));
+        return result;
+    }
+
+    auto result = row[0]->Clone();
+    constexpr size_t blockSize = 256;
+    const bool splitWords = weightSum <= lowMask;
+    for (size_t component = 0; component < prototype.size(); ++component) {
+        auto& output = result->GetElements()[component].GetAllElements();
+        for (size_t tower = 0; tower < output.size(); ++tower) {
+            std::vector<const lbcrypto::NativeVector*> inputs;
+            inputs.reserve(row.size());
+            for (const auto& ct : row)
+                inputs.push_back(&ct->GetElements()[component].GetElementAtIndex(tower).GetValues());
+            const uint64_t modulus = output[tower].GetModulus().ConvertToInt<uint64_t>();
+            const size_t length = output[tower].GetLength();
+            for (size_t begin = 0; begin < length; begin += blockSize) {
+                const size_t count = std::min(blockSize, length - begin);
+                if (splitWords) {
+                    // Each 32-bit word times the sum of weights fits in uint64_t.
+                    // Separate accumulators permit vectorization without reducing
+                    // modulo q after every term. Reduce only the complete sum.
+                    std::array<uint64_t, blockSize> low{}, high{};
+                    for (size_t term = 0; term < inputs.size(); ++term) {
+                        const auto& input = *inputs[term];
+                        const uint64_t weight = weights[term];
+                        for (size_t i = 0; i < count; ++i) {
+                            const auto value = input[begin + i].ConvertToInt<uint64_t>();
+                            low[i] += (value & lowMask) * weight;
+                            high[i] += (value >> 32) * weight;
+                        }
+                    }
+                    for (size_t i = 0; i < count; ++i)
+                        output[tower][begin + i] = uint64_t(((Wide(high[i]) << 32) + low[i]) % modulus);
+                } else {
+                    std::array<Wide, blockSize> sums{};
+                    for (size_t term = 0; term < inputs.size(); ++term) {
+                        const auto& input = *inputs[term];
+                        for (size_t i = 0; i < count; ++i)
+                            sums[i] += Wide(input[begin + i].ConvertToInt<uint64_t>()) * weights[term];
+                    }
+                    for (size_t i = 0; i < count; ++i)
+                        output[tower][begin + i] = uint64_t(sums[i] % modulus);
+                }
+            }
+        }
+    }
     return result;
 }
+
 void ValidateTree(const Setup& s, const SelectorMatrix& selectors, uint64_t entryCount) {
     TreeLevelDrops(selectors.size());
     uint64_t entries = 1;

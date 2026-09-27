@@ -5,6 +5,7 @@
 #include <bit>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -223,6 +224,44 @@ void TestLookup(uint32_t inputBits, uint32_t digitBits, int cleaning = -1, bool 
     Release(s);
     std::cout << " passed\n";
 }
+void TestIntegerContraction() {
+    auto p = ToyParameters(8, 4, 0);
+    p.scaleBits = 59;
+    auto s = CreateSetup(p);
+    std::mt19937_64 random(4061);
+    std::vector<Ciphertext> row;
+    for (size_t i = 0; i < 256; ++i) {
+        std::vector<double> values(s.slots);
+        for (auto& value : values)
+            value = double(random() % 1000) / 1000;
+        row.push_back(s.cc->Encrypt(s.publicKey, s.cc->MakeCKKSPackedPlaintext(values)));
+    }
+    const auto unchanged = row[0]->GetElements();
+    for (uint32_t size : {1u, 2u, 16u, 256u}) {
+        std::vector<Ciphertext> selected(row.begin(), row.begin() + size);
+        for (uint64_t maximum : {uint64_t{0}, uint64_t{65535}, uint64_t{0xffffffff},
+                                 uint64_t(std::numeric_limits<int64_t>::max())}) {
+            std::vector<int64_t> lut(size);
+            for (auto& value : lut)
+                value = maximum ? random() % maximum : 0;
+            lut[0] = maximum;
+            auto expected = s.cc->GetScheme()->MultByInteger(selected[0], lut[0]);
+            for (size_t i = 1; i < lut.size(); ++i)
+                s.cc->EvalAddInPlaceNoCheck(expected, s.cc->GetScheme()->MultByInteger(selected[i], lut[i]));
+            auto actual = EvaluateCleartextTree(s, {selected}, lut);
+            Require(actual->GetElements() == expected->GetElements(),
+                    "Integer contraction changed ciphertext coefficients");
+            Require(actual->GetLevel() == expected->GetLevel() &&
+                        actual->GetNoiseScaleDeg() == expected->GetNoiseScaleDeg() &&
+                        actual->GetScalingFactor() == expected->GetScalingFactor(),
+                    "Integer contraction changed scale metadata");
+        }
+    }
+    Require(row[0]->GetElements() == unchanged, "Integer contraction mutated a selector");
+    Release(s);
+    std::cout << "Exact integer contraction checks passed\n";
+}
+
 void TestEncodedLookup(uint32_t bits, uint32_t digitBits, int cleaning, uint32_t scaleBits = 48) {
     std::cout << "Encoded LUT " << bits << "/" << digitBits << ", cleaning " << cleaning << std::flush;
     std::mt19937_64 random(903 + bits);
@@ -315,6 +354,7 @@ void TestEncodedLookup(uint32_t bits, uint32_t digitBits, int cleaning, uint32_t
 
 int main() {
     try {
+        TestIntegerContraction();
         TestEncodedLookup(1, 8, 0);
         TestEncodedLookup(4, 4, 0);
         TestEncodedLookup(4, 2, 1);
