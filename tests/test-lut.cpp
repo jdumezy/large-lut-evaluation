@@ -214,7 +214,7 @@ void TestLookup(uint32_t inputBits, uint32_t digitBits, int cleaning = -1, bool 
         check();
         std::fill(lut.begin(), lut.end(), s.lutSize - 1);
         check();
-        RequireInvalid([&] { Evaluate(evaluator, input, {}); });
+        RequireInvalid([&] { Evaluate(evaluator, input, std::span<const int64_t>{}); });
         lut[0] = -1;
         RequireInvalid([&] { Evaluate(evaluator, input, lut); });
         lut[0] = s.lutSize;
@@ -223,10 +223,106 @@ void TestLookup(uint32_t inputBits, uint32_t digitBits, int cleaning = -1, bool 
     Release(s);
     std::cout << " passed\n";
 }
+void TestEncodedLookup(uint32_t bits, uint32_t digitBits, int cleaning, uint32_t scaleBits = 48) {
+    std::cout << "Encoded LUT " << bits << "/" << digitBits << ", cleaning " << cleaning << std::flush;
+    std::mt19937_64 random(903 + bits);
+    std::vector<int64_t> table(uint64_t{1} << bits);
+    for (auto& value : table)
+        value = random() % table.size();
+    for (auto kind : {LutKind::Cleartext, LutKind::Plaintext, LutKind::Ciphertext}) {
+        auto p = ToyParameters(bits, digitBits, cleaning);
+        p.lutKind = kind;
+        p.scaleBits = scaleBits;
+        auto s = CreateSetup(p);
+        auto evaluator = s;
+        evaluator.secretKey.reset();
+        std::vector<int64_t> values(p.ringDim);
+        for (size_t i = 0; i < values.size(); ++i)
+            values[i] = i % s.lutSize;
+        auto verify = [&](const auto& lut, bool varying) {
+            for (size_t repetition = 0; repetition < 2; ++repetition) {
+                std::shuffle(values.begin(), values.end(), random);
+                auto input = EncryptInput(s, values);
+                const auto saved = input;
+                auto actual = DecryptOutput(s, Evaluate(evaluator, input, lut));
+                Require(input == saved, "Encoded LUT evaluation changed the RLWE input");
+                for (size_t i = 0; i < values.size(); ++i) {
+                    auto expected = table[values[i]];
+                    if (varying)
+                        expected = (expected + 7 * i + 31 * (i / s.slots)) % s.lutSize;
+                    Require(actual[i] == expected,
+                            "Encoded LUT mismatch at coefficient " + std::to_string(i));
+                }
+            }
+        };
+        if (kind == LutKind::Cleartext) {
+            verify(table, false);
+            RequireInvalid([&] { EncodeLut(s, table); });
+        } else {
+            for (bool varying : {false, true}) {
+                auto plain = varying ? EncodeLut(s,
+                                                 [&](uint64_t index, uint32_t coefficient) -> int64_t {
+                                                     return (table[index] + 7 * coefficient +
+                                                             31 * (coefficient / s.slots)) %
+                                                            s.lutSize;
+                                                 })
+                                     : EncodeLut(s, table);
+                auto savedReal = plain.real[0]->GetElement<DCRTPoly>();
+                auto savedImag = plain.imag.back()->GetElement<DCRTPoly>();
+                if (kind == LutKind::Plaintext) {
+                    verify(plain, varying);
+                    auto malformed = plain;
+                    malformed.imag.pop_back();
+                    RequireInvalid([&] { Evaluate(evaluator, {}, malformed); });
+                    malformed = plain;
+                    malformed.real[0] = nullptr;
+                    RequireInvalid([&] { Evaluate(evaluator, {}, malformed); });
+                    auto level = plain.real[0]->GetLevel();
+                    plain.real[0]->SetLevel(level + 1);
+                    RequireInvalid([&] { Evaluate(evaluator, {}, plain); });
+                    plain.real[0]->SetLevel(level);
+                    RequireInvalid([&] { EncryptLut(evaluator, plain); });
+                } else {
+                    auto encrypted = EncryptLut(evaluator, plain);
+                    auto savedCipherReal = encrypted.real[0]->GetElements();
+                    auto savedCipherImag = encrypted.imag.back()->GetElements();
+                    verify(encrypted, varying);
+                    Require(encrypted.real[0]->GetElements() == savedCipherReal &&
+                                encrypted.imag.back()->GetElements() == savedCipherImag,
+                            "Evaluation mutated encrypted LUT entries");
+                    auto malformed = encrypted;
+                    malformed.real[0] = malformed.real[0]->Clone();
+                    malformed.real[0]->SetKeyTag("different-key");
+                    RequireInvalid([&] { Evaluate(evaluator, {}, malformed); });
+                    malformed = encrypted;
+                    malformed.imag[0] = s.cc->LevelReduce(malformed.imag[0], nullptr, 1);
+                    RequireInvalid([&] { Evaluate(evaluator, {}, malformed); });
+                    RequireInvalid([&] { Evaluate(evaluator, {}, plain); });
+                }
+                Require(plain.real[0]->GetElement<DCRTPoly>() == savedReal &&
+                            plain.imag.back()->GetElement<DCRTPoly>() == savedImag,
+                        "Evaluation or encryption mutated plaintext LUT entries");
+            }
+            RequireInvalid([&] { EncodeLut(s, [](uint64_t, uint32_t) { return -1; }); });
+            RequireInvalid([&] { EncodeLut(s, [&](uint64_t, uint32_t) { return int64_t(s.lutSize); }); });
+            RequireInvalid([&] { Evaluate(evaluator, {}, std::span<const int64_t>(table)); });
+        }
+        Release(s);
+    }
+    std::cout << " passed\n";
+}
 } // namespace
 
 int main() {
     try {
+        TestEncodedLookup(1, 8, 0);
+        TestEncodedLookup(4, 4, 0);
+        TestEncodedLookup(4, 2, 1);
+        TestEncodedLookup(5, 2, 0);
+        TestEncodedLookup(7, 2, 2);
+        TestEncodedLookup(8, 2, 0);
+        TestEncodedLookup(5, 1, 3, 59);
+        TestEncodedLookup(9, 2, 1, 59);
         TestSchedules();
         TestCleaning();
         for (uint32_t digits = 1; digits <= 32; ++digits)
@@ -242,6 +338,7 @@ int main() {
         TestLookup(7, 3, 1);
         TestLookup(10, 4, 2);
         TestLookup(13, 4, 3);
+        TestLookup(16, 4);
         TestLookup(17, 1);
     } catch (const std::exception& error) {
         std::cerr << "\n" << error.what() << '\n';
