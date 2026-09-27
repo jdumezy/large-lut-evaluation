@@ -169,6 +169,19 @@ void TestTree(uint32_t digits) {
     auto values = Slots(s, result);
     for (size_t slot = 0; slot < s.slots; ++slot)
         Require(std::abs(values[slot] - double(lut[indices[slot]])) < 1e-6, "Tree lookup mismatch");
+    const auto drops = TreeLevelDrops(digits);
+    for (size_t digit = 0; digit < selectors.size(); ++digit)
+        for (auto& ct : selectors[digit])
+            if (drops[digit])
+                ct = s.cc->LevelReduce(ct, nullptr, drops[digit]);
+    auto earlyResult = EvaluateCleartextTree(s, selectors, lut);
+    auto earlyValues = Slots(s, earlyResult);
+    Require(earlyResult->GetLevel() == result->GetLevel(), "Early drops changed the tree depth");
+    for (size_t slot = 0; slot < s.slots; ++slot)
+        Require(std::abs(earlyValues[slot] - double(lut[indices[slot]])) < 1e-6,
+                "Tree with early drops lookup mismatch");
+    selectors.back()[0] = s.cc->LevelReduce(selectors.back()[0], nullptr, 1);
+    RequireInvalid([&] { EvaluateCleartextTree(s, selectors, lut); });
     RequireInvalid([&] { EvaluateCleartextTree(s, selectors, {}); });
     Release(s);
 }
@@ -360,6 +373,7 @@ int main() {
         TestEncodedLookup(4, 2, 1);
         TestEncodedLookup(5, 2, 0);
         TestEncodedLookup(7, 2, 2);
+        TestEncodedLookup(7, 3, 1);
         TestEncodedLookup(8, 2, 0);
         TestEncodedLookup(5, 1, 3, 59);
         TestEncodedLookup(9, 2, 1, 59);
@@ -378,7 +392,9 @@ int main() {
         TestLookup(7, 3, 1);
         TestLookup(10, 4, 2);
         TestLookup(13, 4, 3);
+        TestLookup(15, 4);
         TestLookup(16, 4);
+        TestLookup(17, 4);
         TestLookup(17, 1);
     } catch (const std::exception& error) {
         std::cerr << "\n" << error.what() << '\n';

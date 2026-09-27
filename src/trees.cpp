@@ -129,21 +129,27 @@ void ValidateTree(const Setup& s, const SelectorMatrix& selectors, uint64_t entr
                 throw std::invalid_argument("Invalid tree selector");
             if (!first)
                 first = ct;
-            if (ct->GetLevel() != first->GetLevel() || ct->GetScalingFactor() != first->GetScalingFactor())
-                throw std::invalid_argument("Tree selectors must have a common level and scale");
+            if (ct->GetLevel() != row.front()->GetLevel() ||
+                ct->GetScalingFactor() != first->GetScalingFactor())
+                throw std::invalid_argument(
+                    "Tree selectors must have a common scale and a common level within each row");
         }
     }
     if (entries != entryCount)
         throw std::invalid_argument("LUT size does not match the selector rows");
 }
 
-void DropTreeLevels(const Setup& s, SelectorMatrix& selectors) {
-    const auto drops = TreeLevelDrops(selectors.size());
+void DropTreeLevels(const Setup& s, SelectorMatrix& selectors, std::span<const uint32_t> drops,
+                    uint32_t baseLevel) {
     for (size_t digit = 0; digit < selectors.size(); ++digit) {
-        if (drops[digit] == 0)
+        const uint32_t target = baseLevel + drops[digit];
+        const uint32_t level = selectors[digit][0]->GetLevel();
+        if (level < baseLevel || level > target)
+            throw std::invalid_argument("Selector level does not match the tree schedule");
+        if (level == target)
             continue;
         for (auto& ct : selectors[digit])
-            ct = s.cc->LevelReduce(ct, nullptr, drops[digit]);
+            ct = s.cc->LevelReduce(ct, nullptr, target - level);
     }
 }
 
@@ -172,18 +178,13 @@ template <class Entry>
 Ciphertext EncodedTree(const Setup& s, SelectorMatrix selectors, std::span<const Entry> lut) {
     ValidateTree(s, selectors, lut.size());
     const auto branchDepth = selectors.size() == 1 ? 0 : std::bit_width(selectors.size() - 1) - 1;
-    if (selectors[0][0]->GetLevel() + branchDepth != detail::LutEntryLevel(s))
-        throw std::invalid_argument("Selector level does not match the encoded LUT entries");
-    DropTreeLevels(s, selectors);
+    DropTreeLevels(s, selectors, detail::SelectorLevelDrops(s), detail::LutEntryLevel(s) - branchDepth);
     if (selectors.size() == 1)
         return EncodedSum(s, selectors[0], lut, 0, 1);
     auto rows = std::span(selectors);
     const size_t split = (selectors.size() + 1) / 2;
     auto low = Build(s, rows.first(split), true);
     auto high = Build(s, rows.subspan(split), false);
-    // Entry multiplication consumes a level on the high branch.
-    for (auto& ct : low)
-        ct = s.cc->LevelReduce(ct, nullptr, 1);
     Ciphertext result;
 #pragma omp parallel
     {
@@ -232,7 +233,9 @@ Ciphertext EvaluateCleartextTree(const Setup& s, SelectorMatrix selectors, std::
         if (value < 0)
             throw std::invalid_argument("Cleartext tree entries must be nonnegative");
 
-    DropTreeLevels(s, selectors);
+    const auto drops = TreeLevelDrops(selectors.size());
+    // The first row lies on a deepest branch and has no scheduled drop.
+    DropTreeLevels(s, selectors, drops, selectors[0][0]->GetLevel());
     if (selectors.size() == 1)
         return WeightedSum(s, selectors[0], lut, 0, 1);
 
@@ -271,6 +274,15 @@ Ciphertext EvaluateCleartextTree(const Setup& s, SelectorMatrix selectors, std::
     return result;
 }
 namespace detail {
+std::vector<uint32_t> SelectorLevelDrops(const Setup& s) {
+    auto drops = TreeLevelDrops(s.digitWidths.size());
+    if (s.parameters.lutKind != LutKind::Cleartext && drops.size() > 1)
+        // Entry multiplication consumes a level on the high branch.
+        for (size_t digit = 0; digit < (drops.size() + 1) / 2; ++digit)
+            ++drops[digit];
+    return drops;
+}
+
 uint32_t LutEntryLevel(const Setup& s) {
     return s.depth - s.parameters.levelBudget[1] - (s.digitWidths.size() == 1 ? 1 : 2);
 }

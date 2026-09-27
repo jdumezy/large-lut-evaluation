@@ -104,7 +104,7 @@ RLWECiphertext Evaluate(const Setup& s, const RLWECiphertext& input, std::span<c
         if (value < 0 || uint64_t(value) >= s.lutSize)
             throw std::invalid_argument("LUT output outside [0, 2^inputBits)");
 
-    auto selectors = PrepareSelectors(s, Decompose(s, input));
+    auto selectors = PrepareSelectors(s, Decompose(s, input, detail::SelectorLevelDrops(s)));
     auto real = EvaluateCleartextTree(s, std::move(selectors.real), lut);
     auto imag = EvaluateCleartextTree(s, std::move(selectors.imag), lut);
     return DecodeResult(s, real, imag);
@@ -163,7 +163,7 @@ RLWECiphertext Evaluate(const Setup& s, const RLWECiphertext& input, const Plain
     if (s.parameters.lutKind != LutKind::Plaintext)
         throw std::invalid_argument("Plaintext entries require a plaintext LUT setup");
     CheckEncodedLut(s, lut);
-    auto selectors = PrepareSelectors(s, Decompose(s, input));
+    auto selectors = PrepareSelectors(s, Decompose(s, input, detail::SelectorLevelDrops(s)));
     auto real = detail::EvaluatePlaintextTree(s, std::move(selectors.real), lut.real);
     auto imag = detail::EvaluatePlaintextTree(s, std::move(selectors.imag), lut.imag);
     return DecodeResult(s, real, imag);
@@ -173,7 +173,7 @@ RLWECiphertext Evaluate(const Setup& s, const RLWECiphertext& input, const Ciphe
     if (s.parameters.lutKind != LutKind::Ciphertext)
         throw std::invalid_argument("Ciphertext entries require a ciphertext LUT setup");
     CheckEncodedLut(s, lut);
-    auto selectors = PrepareSelectors(s, Decompose(s, input));
+    auto selectors = PrepareSelectors(s, Decompose(s, input, detail::SelectorLevelDrops(s)));
     auto real = detail::EvaluateCiphertextTree(s, std::move(selectors.real), lut.real);
     auto imag = detail::EvaluateCiphertextTree(s, std::move(selectors.imag), lut.imag);
     return DecodeResult(s, real, imag);

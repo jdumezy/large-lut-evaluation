@@ -23,31 +23,38 @@ SplitPowers SeparatePowers(const Powers& powers) {
                                                      powers->k, powers->m)};
 }
 
-SplitCiphertext EvaluateSplit(const Setup& s, const SplitPowers& powers, const Coefficients& coefficients) {
-    SplitCiphertext result;
-    for (size_t half = 0; half < result.size(); ++half) {
-        if (s.digitBits == 1) {
-            // Binary precomputation gives cos^2(pi*x/2). Clone before applying
-            // the affine map so the other functions can reuse the same powers.
-            result[half] = powers[half]->powersRe.front()->Clone();
-            if (coefficients[1].real() < 0)
-                result[half] = s.cc->EvalSub(1.0, result[half]);
-        } else {
-            auto localPowers = powers[half];
-            if (coefficients.size() < 6) {
-                // OpenFHE's linear evaluator scales its input powers in place.
-                auto copies = powers[half]->powersRe;
-                for (auto& power : copies)
-                    power = power->Clone();
-                localPowers = std::make_shared<seriesPowers<DCRTPoly>>(copies);
-            }
-            result[half] = s.cc->EvalPolyWithPrecomp(localPowers, coefficients);
-            auto conjugate = FHECKKSRNS::Conjugate(
-                result[half], s.cc->GetEvalAutomorphismKeyMap(result[half]->GetKeyTag()));
-            // The Hermite coefficients already include the factor 1/2.
-            s.cc->EvalAddInPlace(result[half], conjugate);
-        }
+void DropPowers(const Setup& s, const SplitPowers& powers, uint32_t levels) {
+    if (levels == 0)
+        return;
+    for (const auto& half : powers) {
+        for (auto* row : {&half->powersRe, &half->powers2Re})
+            for (auto& power : *row)
+                if (power)
+                    power = s.cc->LevelReduce(power, nullptr, levels);
+        if (half->power2km1Re)
+            half->power2km1Re = s.cc->LevelReduce(half->power2km1Re, nullptr, levels);
     }
+}
+
+Ciphertext EvaluateHalf(const Setup& s, const Powers& powers, const Coefficients& coefficients) {
+    if (s.digitBits == 1) {
+        // Binary precomputation gives cos^2(pi*x/2). Clone before applying
+        // the affine map so the other functions can reuse the same powers.
+        auto result = powers->powersRe.front()->Clone();
+        return coefficients[1].real() < 0 ? s.cc->EvalSub(1.0, result) : result;
+    }
+    auto localPowers = powers;
+    if (coefficients.size() < 6) {
+        // OpenFHE's linear evaluator scales its input powers in place.
+        auto copies = powers->powersRe;
+        for (auto& power : copies)
+            power = power->Clone();
+        localPowers = std::make_shared<seriesPowers<DCRTPoly>>(copies);
+    }
+    auto result = s.cc->EvalPolyWithPrecomp(localPowers, coefficients);
+    auto conjugate = FHECKKSRNS::Conjugate(result, s.cc->GetEvalAutomorphismKeyMap(result->GetKeyTag()));
+    // The Hermite coefficients already include the factor 1/2.
+    s.cc->EvalAddInPlace(result, conjugate);
     return result;
 }
 } // namespace
@@ -58,7 +65,12 @@ Ciphertext Recompose(const Setup& s, const Ciphertext& real, const Ciphertext& i
     return result;
 }
 
-SplitSelectors Decompose(const Setup& s, const RLWECiphertext& input) {
+SplitSelectors Decompose(const Setup& s, const RLWECiphertext& input, std::span<const uint32_t> levelDrops) {
+    if (!levelDrops.empty() && levelDrops.size() != s.digitWidths.size())
+        throw std::invalid_argument("Expected one level drop per digit");
+    for (auto drop : levelDrops)
+        if (drop > s.computationDepth)
+            throw std::invalid_argument("Digit level drop exceeds the computation depth");
     if (input.size() != 2)
         throw std::invalid_argument("An RLWE ciphertext must have two polynomials");
     for (const auto& poly : input)
@@ -77,20 +89,27 @@ SplitSelectors Decompose(const Setup& s, const RLWECiphertext& input) {
         auto ckks = SchemeletRLWEMP::ConvertRLWEToCKKS(*s.cc, reduced, s.publicKey, s.q, s.slots, s.depth);
         auto powers = SeparatePowers(s.cc->EvalMVBPrecompute(ckks, s.modCoefficients, s.digitBits, s.qPrime));
 
+        const uint32_t drop = levelDrops.empty() ? 0 : levelDrops[digit];
+        DropPowers(s, powers, drop);
         const bool hasNext = digit + 1 < s.digitWidths.size();
         SplitCiphertext extracted;
-        if (hasNext)
-            extracted = EvaluateSplit(s, powers, s.modCoefficients);
 
         const uint32_t count = (1u << s.digitWidths[digit]) - 1;
         const uint32_t stride = 1u << (s.digitBits - s.digitWidths[digit]);
         result.real[digit].resize(count);
         result.imag[digit].resize(count);
-#pragma omp parallel for
-        for (uint32_t selector = 0; selector < count; ++selector) {
-            auto split = EvaluateSplit(s, powers, s.selectorCoefficients[selector * stride]);
-            result.real[digit][selector] = std::move(split[0]);
-            result.imag[digit][selector] = std::move(split[1]);
+        const uint32_t functions = count + hasNext;
+#pragma omp parallel for schedule(static)
+        for (uint32_t task = 0; task < 2 * functions; ++task) {
+            const uint32_t function = task / 2;
+            const uint32_t half = task % 2;
+            const auto& coefficients =
+                function == count ? s.modCoefficients : s.selectorCoefficients[function * stride];
+            auto value = EvaluateHalf(s, powers[half], coefficients);
+            if (function == count)
+                extracted[half] = std::move(value);
+            else
+                (half == 0 ? result.real : result.imag)[digit][function] = std::move(value);
         }
 
         if (hasNext) {
@@ -98,7 +117,7 @@ SplitSelectors Decompose(const Setup& s, const RLWECiphertext& input) {
             // Decoding was set up for the original input modulus. Restore the
             // current residual's scale, including the digit polynomial's scale.
             auto decoded =
-                s.cc->EvalHomDecoding(joined, uint64_t(s.modScale) << removedBits, s.computationDepth);
+                s.cc->EvalHomDecoding(joined, uint64_t(s.modScale) << removedBits, s.computationDepth - drop);
             auto lowDigit = SchemeletRLWEMP::ConvertCKKSToRLWE(decoded, currentQ);
             for (size_t component = 0; component < residual.size(); ++component)
                 residual[component] -= lowDigit[component];

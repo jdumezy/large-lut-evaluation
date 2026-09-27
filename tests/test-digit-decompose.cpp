@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include "digit-decompose.hpp"
 #include "schemelet/rlwe-mp.h"
+#include "trees.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -68,7 +69,8 @@ std::vector<int64_t> Decode(const Setup& s, const large_lut::Ciphertext& real,
     auto joined = Recompose(s, real, imag);
     Require(real->GetElements() == realElements && imag->GetElements() == imagElements,
             "Recomposition changed its inputs");
-    auto decoded = s.cc->EvalHomDecoding(joined, 1, s.computationDepth);
+    const auto targetLevel = s.depth - s.parameters.levelBudget[1];
+    auto decoded = s.cc->EvalHomDecoding(joined, 1, targetLevel - joined->GetLevel());
     return DecryptOutput(s, SchemeletRLWEMP::ConvertCKKSToRLWE(decoded, s.q));
 }
 
@@ -145,12 +147,15 @@ double CheckSelectors(const Setup& s, const SplitSelectors& selectors, const std
     return maxError;
 }
 
-void TestCase(uint32_t inputBits, uint32_t digitBits, uint32_t h = 192, bool repeat = false) {
-    std::cout << "Input " << inputBits << ", digit " << digitBits << ", h " << h << std::flush;
+void TestCase(uint32_t inputBits, uint32_t digitBits, uint32_t h = 192, bool repeat = false,
+              bool earlyDrops = false, LutKind kind = LutKind::Cleartext) {
+    std::cout << "Input " << inputBits << ", digit " << digitBits << ", h " << h << ", early drops "
+              << earlyDrops << std::flush;
     Parameters parameters;
     parameters.inputBits = inputBits;
     parameters.digitBits = digitBits;
     parameters.h = h;
+    parameters.lutKind = kind;
     parameters.toy = true;
     parameters.ringDim = 256;
     auto s = CreateSetup(parameters);
@@ -160,12 +165,24 @@ void TestCase(uint32_t inputBits, uint32_t digitBits, uint32_t h = 192, bool rep
         auto values = MakeInputs(s, seed);
         auto input = EncryptInput(s, values);
         auto unchanged = input;
-        auto selectors = Decompose(evaluator, input);
+        const auto drops = earlyDrops ? large_lut::detail::SelectorLevelDrops(s) : std::vector<uint32_t>{};
+        auto selectors = Decompose(evaluator, input, drops);
+        const auto baseLevel = s.depth - s.computationDepth - s.parameters.levelBudget[1];
+        for (const auto* half : {&selectors.real, &selectors.imag})
+            for (size_t digit = 0; digit < half->size(); ++digit)
+                for (const auto& ct : (*half)[digit])
+                    Require(ct->GetLevel() == baseLevel + (earlyDrops ? drops[digit] : 0) &&
+                                ct->GetNoiseScaleDeg() == 1,
+                            "Unexpected selector level or scale degree");
         Require(input == unchanged, "Decomposition changed its input");
         const double error = CheckSelectors(s, selectors, values);
         std::cout << ", error " << error << std::flush;
         if (repeat) {
             RequireInvalid([&] { Decompose(evaluator, {}); });
+            const std::vector<uint32_t> wrongSize(s.digitWidths.size() + 1);
+            RequireInvalid([&] { Decompose(evaluator, input, wrongSize); });
+            const std::vector<uint32_t> tooDeep(s.digitWidths.size(), s.computationDepth + 1);
+            RequireInvalid([&] { Decompose(evaluator, input, tooDeep); });
             auto malformed = input;
             malformed[0].SwitchModulus(s.q >> 1, 1, 0, 0);
             RequireInvalid([&] { Decompose(evaluator, malformed); });
@@ -190,6 +207,13 @@ int main() {
             TestCase(16 + top, 8);
         for (uint32_t bits = 1; bits <= 8; ++bits)
             TestCase(32, bits);
+        TestCase(15, 4);
+        TestCase(9, 3, 192, true, true);
+        TestCase(17, 4, 192, false, true);
+        TestCase(9, 8, 192, false, true, LutKind::Ciphertext);
+        TestCase(5, 2, 192, false, true, LutKind::Plaintext);
+        TestCase(32, 1, 192, false, true);
+        TestCase(31, 1, 192, false, true);
         TestCase(13, 4, 32);
         TestCase(13, 4, 256);
     } catch (const std::exception& error) {

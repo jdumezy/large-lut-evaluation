@@ -7,11 +7,14 @@ namespace large_lut {
 // Initial level reductions for the collapsed tree, for 1..32 digit rows.
 std::vector<uint32_t> TreeLevelDrops(uint32_t digits);
 
-// Complete selector rows, least significant first, at a common level and scale.
+// Complete selector rows, least significant first, at a common scale. Levels
+// may be common or already reduced according to TreeLevelDrops.
 // LUT indexing uses mixed radix: row 0 varies fastest. Its size must equal the
 // product of the row widths. Input ciphertexts are not modified.
 Ciphertext EvaluateCleartextTree(const Setup& setup, SelectorMatrix selectors, std::span<const int64_t> lut);
 namespace detail {
+// Includes the extra root-branch drop for encoded LUTs.
+std::vector<uint32_t> SelectorLevelDrops(const Setup& setup);
 // Internal kernels: callers validate encoded entries against the setup first.
 // Entries are multiplied into one root side before the final contraction.
 uint32_t LutEntryLevel(const Setup& setup);
