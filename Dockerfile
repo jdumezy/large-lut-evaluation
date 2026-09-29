@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG BUILD_JOBS=2
 ARG NATIVEOPT=ON
 ARG BUILD_TYPE=Release
-RUN git clone --depth 1 --branch v1.5.1 https://github.com/openfheorg/openfhe-development.git /opt/openfhe \
+RUN git clone --depth 1 --branch v1.6.0 https://github.com/openfheorg/openfhe-development.git /opt/openfhe \
     && cmake -S /opt/openfhe -B /opt/openfhe/build -G Ninja \
        -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
        -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DBUILD_UNITTESTS=OFF -DBUILD_EXAMPLES=OFF \

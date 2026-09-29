@@ -43,15 +43,7 @@ Ciphertext EvaluateHalf(const Setup& s, const Powers& powers, const Coefficients
         auto result = powers->powersRe.front()->Clone();
         return coefficients[1].real() < 0 ? s.cc->EvalSub(1.0, result) : result;
     }
-    auto localPowers = powers;
-    if (coefficients.size() < 6) {
-        // OpenFHE's linear evaluator scales its input powers in place.
-        auto copies = powers->powersRe;
-        for (auto& power : copies)
-            power = power->Clone();
-        localPowers = std::make_shared<seriesPowers<DCRTPoly>>(copies);
-    }
-    auto result = s.cc->EvalPolyWithPrecomp(localPowers, coefficients);
+    auto result = s.cc->EvalPolyWithPrecomp(powers, coefficients);
     auto conjugate = FHECKKSRNS::Conjugate(result, s.cc->GetEvalAutomorphismKeyMap(result->GetKeyTag()));
     // The Hermite coefficients already include the factor 1/2.
     s.cc->EvalAddInPlace(result, conjugate);

@@ -10,7 +10,7 @@ endif()
 
 option(NATIVEOPT "Enable machine-specific optimizations" ON)
 
-find_package(OpenFHE 1.5.1 CONFIG REQUIRED)
+find_package(OpenFHE 1.6.0 CONFIG REQUIRED)
 message(STATUS "OpenFHE ${BASE_OPENFHE_VERSION}, native size ${OpenFHE_NATIVE_SIZE}")
 if(NOT OpenFHE_NATIVE_SIZE EQUAL 64)
     message(FATAL_ERROR "This implementation requires 64-bit OpenFHE")

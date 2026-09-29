@@ -2,12 +2,12 @@ Evaluating Larger Lookup Tables using CKKS
 ---
 
 Proof of concept implementation of the paper [Evaluating Larger Lookup Tables using CKKS](https://tches.iacr.org/index.php/TCHES/article/view/12693).
-It is based on the more recent [OpenFHE v1.5.1](https://github.com/openfheorg/openfhe-development/releases/tag/v1.5.1), and hence has better performance than in the paper.
+It is based on the more recent [OpenFHE v1.6.0](https://github.com/openfheorg/openfhe-development/releases/tag/v1.6.0), and hence has better performance than in the paper.
 Integration in the main OpenFHE library is planned.
 
 ## Installation
 
-With OpenFHE v1.5.1 installed systemwide (64-bit native integers), Clang with C++20 support, CMake, and OpenMP:
+With OpenFHE v1.6.0 installed systemwide (64-bit native integers), Clang with C++20 support, CMake, and OpenMP:
 
 ```sh
 cmake -S . -B build -DCMAKE_CXX_COMPILER=clang++
@@ -47,7 +47,7 @@ Three small toy checks are available with `OMP_NUM_THREADS=16 ctest --test-dir b
 
 ## Docker
 
-The image builds OpenFHE v1.5.1 and the benchmark executable:
+The image builds OpenFHE v1.6.0 and the benchmark executable:
 
 ```sh
 docker build -t large-lut .

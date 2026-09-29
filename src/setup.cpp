@@ -209,7 +209,7 @@ Setup CreateSetup(Parameters p) {
     // interval independent of the main secret's Hamming weight.
     constexpr auto secretDistribution = SPARSE_ENCAPSULATED;
     s.depth = s.computationDepth + FHECKKSRNS::GetFBTDepth(p.levelBudget, s.modCoefficients, BigInteger(base),
-                                                           1, secretDistribution);
+                                                           1, secretDistribution, s.parameters.scaleBits);
     if (p.largeDigits > s.depth + 1)
         throw std::invalid_argument("largeDigits exceeds the number of Q towers");
     CCParams<CryptoContextCKKSRNS> cp;
@@ -234,10 +234,10 @@ Setup CreateSetup(Parameters p) {
         if (s.logQP > SecurityBound(p.ringDim, p.h))
             throw std::invalid_argument("log2(QP)=" + std::to_string(s.logQP) +
                                         " exceeds the 128-bit security bound for h=" + std::to_string(p.h));
-        const auto& q0 = crypto->GetElementParams()->GetParams().front()->GetModulus();
-        const auto& p0 = crypto->GetParamsP()->GetParams().front()->GetModulus();
-        const double logSparseQP = std::log2(q0.ConvertToDouble()) + std::log2(p0.ConvertToDouble());
-        if (logSparseQP > SecurityBound(p.ringDim, 32))
+        double logSparseQP = 0;
+        for (const auto& prime : crypto->GetSparseKSParamsQP()->GetParams())
+            logSparseQP += std::log2(prime->GetModulus().ConvertToDouble());
+        if (logSparseQP > SecurityBound(p.ringDim, crypto->GetSparseKSHammingWeight()))
             throw std::invalid_argument("Sparse encapsulation modulus exceeds the 128-bit security bound");
     }
     auto keys = GenerateKeys(s.cc, p.h);
